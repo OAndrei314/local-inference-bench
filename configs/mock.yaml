@@ -1,0 +1,11 @@
+# Zero-setup config -- no server, no network access. Two mock backends with different
+# simulated throughput/overhead so the report has something to compare.
+backends:
+  - name: mock-fast
+    kind: mock
+    tokens_per_s: 80
+    overhead_s: 0.03
+  - name: mock-slow
+    kind: mock
+    tokens_per_s: 25
+    overhead_s: 0.15
