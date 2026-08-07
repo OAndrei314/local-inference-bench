@@ -1,0 +1,17 @@
+# Copy to configs/backends.yaml and point at real local servers.
+# Any OpenAI-compatible /v1/chat/completions endpoint works -- Ollama, vLLM, llama.cpp
+# server mode, etc.
+backends:
+  - name: ollama-local
+    kind: openai_compat
+    base_url: http://localhost:11434/v1
+    model: llama4
+    api_key_env: null
+    timeout_s: 120
+
+  - name: vllm-local
+    kind: openai_compat
+    base_url: http://localhost:8000/v1
+    model: qwen-3.5
+    api_key_env: null
+    timeout_s: 120
