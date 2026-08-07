@@ -5,7 +5,9 @@ backends:
     kind: mock
     tokens_per_s: 80
     overhead_s: 0.03
+    ttft_s: 0.03
   - name: mock-slow
     kind: mock
     tokens_per_s: 25
     overhead_s: 0.15
+    ttft_s: 0.15

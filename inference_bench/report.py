@@ -13,6 +13,16 @@ def _percentile(sorted_values: list[float], p: float) -> float:
     return sorted_values[idx]
 
 
+def _format_float(value: float | None, digits: int = 3) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.{digits}f}"
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
 def _load_records(results_dir: str | Path) -> dict[str, list[dict]]:
     results_dir = Path(results_dir)
     by_backend: dict[str, list[dict]] = {}
@@ -49,8 +59,8 @@ def build_report(results_dir: str | Path) -> str:
         "",
         "## Results",
         "",
-        "| backend | runs | mean latency (s) | p50 (s) | p95 (s) | mean tokens/s |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| backend | runs | mean latency (s) | p50 (s) | p95 (s) | mean TTFT (s) | p95 TTFT (s) | mean tokens/s | mean decode tokens/s | est. token runs |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 
     for backend, recs in sorted(by_backend.items()):
@@ -58,11 +68,29 @@ def build_report(results_dir: str | Path) -> str:
         mean_lat = sum(latencies) / len(latencies)
         p50 = _percentile(latencies, 50)
         p95 = _percentile(latencies, 95)
+        ttfts = sorted(r["ttft_s"] for r in recs if r.get("ttft_s") is not None)
+        mean_ttft = _mean(ttfts)
+        p95_ttft = _percentile(ttfts, 95) if ttfts else None
         throughputs = [r["tokens_per_s"] for r in recs if r.get("tokens_per_s")]
-        mean_tps = sum(throughputs) / len(throughputs) if throughputs else float("nan")
+        mean_tps = _mean(throughputs)
+        decode_tps = [r["decode_tokens_per_s"] for r in recs if r.get("decode_tokens_per_s")]
+        mean_decode_tps = _mean(decode_tps)
+        estimated_token_runs = sum(1 for r in recs if r.get("tokens_estimated"))
         lines.append(
-            f"| {backend} | {len(recs)} | {mean_lat:.3f} | {p50:.3f} | {p95:.3f} | {mean_tps:.2f} |"
+            f"| {backend} | {len(recs)} | {mean_lat:.3f} | {p50:.3f} | {p95:.3f} | "
+            f"{_format_float(mean_ttft)} | {_format_float(p95_ttft)} | "
+            f"{_format_float(mean_tps, 2)} | {_format_float(mean_decode_tps, 2)} | "
+            f"{estimated_token_runs} |"
         )
+
+    lines.extend(
+        [
+            "",
+            "TTFT and decode throughput are populated only for runs captured with",
+            "`run --stream`. If a server does not report usage in streaming mode,",
+            "completion tokens are estimated from streamed text and counted above.",
+        ]
+    )
 
     lines.append("")
     lines.append("### By workload bucket (short/medium/long)")

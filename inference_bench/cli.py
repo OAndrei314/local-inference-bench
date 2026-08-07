@@ -16,6 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--config", required=True, help="path to backends YAML config")
     run_p.add_argument("--repeats", type=int, default=3)
     run_p.add_argument("--out", required=True, help="output directory for result JSONL files")
+    run_p.add_argument(
+        "--stream",
+        action="store_true",
+        help="request streaming completions and measure time-to-first-token",
+    )
 
     report_p = sub.add_parser("report", help="build a markdown report from results")
     report_p.add_argument("--results", required=True, help="results directory (from `run --out`)")
@@ -25,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         specs = load_backend_specs(args.config)
-        run_benchmark(DEFAULT_WORKLOAD, specs, args.repeats, args.out)
+        run_benchmark(DEFAULT_WORKLOAD, specs, args.repeats, args.out, stream=args.stream)
         return 0
 
     if args.command == "report":

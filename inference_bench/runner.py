@@ -23,10 +23,11 @@ def load_backend_specs(config_path: str | Path) -> list[tuple[str, BackendSpec, 
             base_url=entry.get("base_url", ""),
             model=entry.get("model", entry["name"]),
             api_key_env=entry.get("api_key_env"),
+            timeout_s=float(entry.get("timeout_s", 120.0)),
         )
         extra = {
             k: v for k, v in entry.items()
-            if k in ("tokens_per_s", "overhead_s")
+            if k in ("tokens_per_s", "overhead_s", "ttft_s")
         }
         out.append((kind, spec, extra))
     return out
@@ -37,6 +38,7 @@ def run_benchmark(
     backend_specs: list[tuple[str, BackendSpec, dict]],
     repeats: int,
     out_dir: str | Path,
+    stream: bool = False,
 ) -> None:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -47,16 +49,24 @@ def run_benchmark(
         with out_path.open("w", encoding="utf-8") as f:
             for item in workload:
                 for rep in range(repeats):
-                    result = backend.complete(spec, item.prompt, item.max_tokens)
+                    result = backend.complete(spec, item.prompt, item.max_tokens, stream=stream)
                     record = {
                         "backend": spec.name,
                         "item_id": item.id,
                         "rep": rep,
                         "max_tokens": item.max_tokens,
+                        "stream": stream,
                         "latency_s": round(result.latency_s, 4),
                         "completion_tokens": result.completion_tokens,
+                        "tokens_estimated": result.tokens_estimated,
                         "tokens_per_s": (
                             round(result.tokens_per_s, 2) if result.tokens_per_s else None
+                        ),
+                        "ttft_s": round(result.ttft_s, 4) if result.ttft_s is not None else None,
+                        "decode_tokens_per_s": (
+                            round(result.decode_tokens_per_s, 2)
+                            if result.decode_tokens_per_s
+                            else None
                         ),
                     }
                     f.write(json.dumps(record) + "\n")

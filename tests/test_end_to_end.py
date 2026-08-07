@@ -17,6 +17,7 @@ def test_full_pipeline_with_mock_backends(tmp_path):
     assert "mock-fast" in report
     assert "mock-slow" in report
     assert "Research question" in report
+    assert "mean TTFT" in report
 
 
 def test_mock_fast_backend_has_lower_mean_latency_than_mock_slow(tmp_path):
@@ -32,3 +33,22 @@ def test_mock_fast_backend_has_lower_mean_latency_than_mock_slow(tmp_path):
         return sum(vals) / len(vals)
 
     assert mean_latency("mock-fast") < mean_latency("mock-slow")
+
+
+def test_streaming_pipeline_records_ttft(tmp_path):
+    specs = load_backend_specs("configs/mock.yaml")
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD[:1], specs, repeats=1, out_dir=out_dir, stream=True)
+
+    import json
+
+    records = [
+        json.loads(line)
+        for path in out_dir.glob("*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert records
+    assert all(r["stream"] is True for r in records)
+    assert all(r["ttft_s"] is not None for r in records)
+    assert all(r["decode_tokens_per_s"] is not None for r in records)

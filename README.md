@@ -25,9 +25,10 @@ toward self-hosted open-weight models instead of API providers.
   target output lengths, so results show how latency scales with generation length instead
   of one aggregate number.
 - `inference_bench/runner.py` — runs the workload against each configured backend
-  `--repeats` times, writes per-run JSONL.
+  `--repeats` times, writes per-run JSONL, and can request streaming responses to measure
+  time-to-first-token.
 - `inference_bench/report.py` — aggregates into mean/p50/p95 latency and mean tokens/sec,
-  overall and broken down by workload bucket.
+  streaming TTFT, decode throughput, overall results, and workload buckets.
 
 ## Quickstart
 
@@ -38,6 +39,9 @@ pip install -r requirements.txt
 python -m inference_bench.cli run --config configs/mock.yaml --repeats 3 --out results/mock
 python -m inference_bench.cli report --results results/mock --out report.md
 
+# Streaming mode adds TTFT/decode metrics when the backend supports SSE streaming
+python -m inference_bench.cli run --config configs/mock.yaml --repeats 3 --out results/mock-stream --stream
+
 # Real run: copy configs/backends.example.yaml, point base_url at a running
 # Ollama/vLLM/llama.cpp server, then:
 python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --out results/live
@@ -45,26 +49,25 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
 
 ## Honest scope limits
 
-1. **This measures total request latency, not true time-to-first-token.** TTFT needs
-   streaming (`stream=True`, reading SSE chunks as they arrive) — not implemented here.
-   Reported "tokens/s" is `completion_tokens / total_latency`, which is a reasonable
-   *throughput* proxy but conflates prefill and decode time, so don't read it as a
-   per-decode-step rate.
+1. **TTFT requires `--stream`.** Non-streaming runs still report total latency and
+   throughput only. Streaming runs measure the first content chunk from the server. If the
+   server does not return `usage.completion_tokens` in streaming mode, the harness falls
+   back to a rough whitespace-token estimate and flags those runs in the report.
 2. **The mock numbers below are a pipeline demonstration, not a backend comparison.** They
    come from `MockBackend`'s two hardcoded rate/overhead presets, not real servers:
 
-   | backend | runs | mean latency (s) | p50 (s) | p95 (s) | mean tokens/s |
-   | --- | ---: | ---: | ---: | ---: | ---: |
-   | mock-fast | 18 | 1.397 | 0.830 | 3.230 | 80.00 |
-   | mock-slow | 18 | 4.523 | 2.710 | 10.390 | 25.00 |
+   | backend | runs | mean latency (s) | p50 (s) | p95 (s) | mean TTFT (s) | mean tokens/s | mean decode tokens/s |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | mock-fast | 18 | 1.397 | 0.830 | 3.230 | 0.030 | 72.64 | 80.00 |
+   | mock-slow | 18 | 4.523 | 2.710 | 10.390 | 0.150 | 21.76 | 25.00 |
 
    A real comparison requires actually running two backends on the same hardware and model
    — that's on you (or whoever clones this) to do, not something a mock can substitute for.
 
 ## Status / next steps
 
-Streaming support (for real TTFT) and a memory-footprint measurement (via the serving
-process's RSS, where the harness has local access to it) are the natural next steps.
+Memory-footprint measurement (via the serving process's RSS, where the harness has local
+access to it) is the natural next step.
 
 ## License
 

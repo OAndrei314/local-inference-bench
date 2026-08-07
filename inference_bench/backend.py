@@ -4,11 +4,6 @@ OpenAICompatBackend talks to any server exposing an OpenAI-compatible
 /v1/chat/completions endpoint -- which covers Ollama, vLLM, llama.cpp's server mode,
 and most self-hosted open-weight model deployments. MockBackend exists so the harness
 is runnable and testable with zero servers and zero network access.
-
-Honest scope note: this measures total request latency and derives tokens/sec from
-`usage.completion_tokens / latency`. It does NOT measure true time-to-first-token,
-since that needs streaming (`stream=True` + reading the SSE chunks as they arrive) --
-a real next step, not faked here with a guessed number.
 """
 from __future__ import annotations
 
@@ -17,6 +12,7 @@ import os
 import time
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -33,24 +29,80 @@ class RequestResult:
     latency_s: float
     completion_tokens: int | None
     tokens_per_s: float | None  # None if the server didn't report usage
+    ttft_s: float | None = None
+    decode_tokens_per_s: float | None = None
+    tokens_estimated: bool = False
 
 
 class Backend:
-    def complete(self, spec: BackendSpec, prompt: str, max_tokens: int) -> RequestResult:
+    def complete(
+        self,
+        spec: BackendSpec,
+        prompt: str,
+        max_tokens: int,
+        stream: bool = False,
+    ) -> RequestResult:
         raise NotImplementedError
 
 
+def _estimate_tokens(text: str) -> int | None:
+    tokens = [part for part in text.replace("\n", " ").split(" ") if part]
+    return len(tokens) or None
+
+
+def _result_from_measurement(
+    latency_s: float,
+    completion_tokens: int | None,
+    ttft_s: float | None = None,
+    tokens_estimated: bool = False,
+) -> RequestResult:
+    tokens_per_s = completion_tokens / latency_s if completion_tokens and latency_s > 0 else None
+    decode_duration_s = latency_s - ttft_s if ttft_s is not None else None
+    decode_tokens_per_s = (
+        completion_tokens / decode_duration_s
+        if completion_tokens and decode_duration_s and decode_duration_s > 0
+        else None
+    )
+    return RequestResult(
+        latency_s=latency_s,
+        completion_tokens=completion_tokens,
+        tokens_per_s=tokens_per_s,
+        ttft_s=ttft_s,
+        decode_tokens_per_s=decode_tokens_per_s,
+        tokens_estimated=tokens_estimated,
+    )
+
+
+def _parse_sse_data_line(raw_line: bytes) -> dict[str, Any] | None:
+    line = raw_line.decode("utf-8").strip()
+    if not line.startswith("data:"):
+        return None
+    payload = line.removeprefix("data:").strip()
+    if not payload or payload == "[DONE]":
+        return None
+    return json.loads(payload)
+
+
 class OpenAICompatBackend(Backend):
-    def complete(self, spec: BackendSpec, prompt: str, max_tokens: int) -> RequestResult:
+    def complete(
+        self,
+        spec: BackendSpec,
+        prompt: str,
+        max_tokens: int,
+        stream: bool = False,
+    ) -> RequestResult:
         api_key = os.environ.get(spec.api_key_env, "") if spec.api_key_env else ""
-        payload = json.dumps(
-            {
-                "model": spec.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            }
-        ).encode("utf-8")
+        payload_obj: dict[str, Any] = {
+            "model": spec.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0,
+        }
+        if stream:
+            payload_obj["stream"] = True
+            payload_obj["stream_options"] = {"include_usage": True}
+
+        payload = json.dumps(payload_obj).encode("utf-8")
         req = urllib.request.Request(
             url=f"{spec.base_url.rstrip('/')}/chat/completions",
             data=payload,
@@ -61,14 +113,61 @@ class OpenAICompatBackend(Backend):
             },
         )
         start = time.monotonic()
+        if stream:
+            return self._complete_streaming(req, spec.timeout_s, start)
+
         with urllib.request.urlopen(req, timeout=spec.timeout_s) as resp:
             body = json.loads(resp.read())
         latency = time.monotonic() - start
 
         usage = body.get("usage", {})
         completion_tokens = usage.get("completion_tokens")
-        tokens_per_s = completion_tokens / latency if completion_tokens else None
-        return RequestResult(latency, completion_tokens, tokens_per_s)
+        return _result_from_measurement(latency, completion_tokens)
+
+    def _complete_streaming(
+        self,
+        req: urllib.request.Request,
+        timeout_s: float,
+        start: float,
+    ) -> RequestResult:
+        first_token_at: float | None = None
+        completion_tokens: int | None = None
+        content_parts: list[str] = []
+
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            while True:
+                raw_line = resp.readline()
+                if not raw_line:
+                    break
+                event = _parse_sse_data_line(raw_line)
+                if event is None:
+                    continue
+
+                usage = event.get("usage") or {}
+                if usage.get("completion_tokens") is not None:
+                    completion_tokens = int(usage["completion_tokens"])
+
+                for choice in event.get("choices", []):
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content") or ""
+                    if content:
+                        if first_token_at is None:
+                            first_token_at = time.monotonic()
+                        content_parts.append(content)
+
+        latency = time.monotonic() - start
+        tokens_estimated = False
+        if completion_tokens is None and content_parts:
+            completion_tokens = _estimate_tokens("".join(content_parts))
+            tokens_estimated = completion_tokens is not None
+
+        ttft_s = first_token_at - start if first_token_at is not None else None
+        return _result_from_measurement(
+            latency,
+            completion_tokens,
+            ttft_s=ttft_s,
+            tokens_estimated=tokens_estimated,
+        )
 
 
 class MockBackend(Backend):
@@ -76,13 +175,31 @@ class MockBackend(Backend):
     rate plus a fixed request overhead, so the harness has something real to exercise
     end-to-end without a running server. Not a claim about any real backend's speed."""
 
-    def __init__(self, tokens_per_s: float = 40.0, overhead_s: float = 0.05):
+    def __init__(
+        self,
+        tokens_per_s: float = 40.0,
+        overhead_s: float = 0.05,
+        ttft_s: float | None = None,
+    ):
         self.tokens_per_s = tokens_per_s
         self.overhead_s = overhead_s
+        self.ttft_s = ttft_s
 
-    def complete(self, spec: BackendSpec, prompt: str, max_tokens: int) -> RequestResult:
+    def complete(
+        self,
+        spec: BackendSpec,
+        prompt: str,
+        max_tokens: int,
+        stream: bool = False,
+    ) -> RequestResult:
         simulated_latency = self.overhead_s + max_tokens / self.tokens_per_s
-        return RequestResult(simulated_latency, max_tokens, self.tokens_per_s)
+        ttft_s = None
+        if stream:
+            ttft_s = min(
+                self.ttft_s if self.ttft_s is not None else self.overhead_s,
+                simulated_latency,
+            )
+        return _result_from_measurement(simulated_latency, max_tokens, ttft_s=ttft_s)
 
 
 def get_backend(kind: str, **kwargs) -> Backend:
