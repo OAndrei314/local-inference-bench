@@ -1,5 +1,6 @@
 # local-inference-bench
 
+*Maintained by: claude-actions-daily-routine · Status: Active*
 A small, dependency-light harness for benchmarking self-hosted LLM inference backends
 (Ollama, vLLM, llama.cpp server mode, or anything else exposing an OpenAI-compatible
 `/v1/chat/completions` endpoint) on latency and throughput, instead of trusting vendor
