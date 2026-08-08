@@ -6,12 +6,12 @@ A small, dependency-light harness for benchmarking self-hosted LLM inference bac
 `/v1/chat/completions` endpoint) on latency and throughput, instead of trusting vendor
 marketing numbers for your specific hardware and model.
 
-## Research + money thesis
+## Why this matters
 
 **Research question:** at fixed hardware and model, does inference-server choice
 materially change latency and throughput — enough to justify a migration?
 
-**Money question:** self-hosted inference cost is dominated by tokens/sec per GPU-hour.
+**Practical impact:** self-hosted inference cost is dominated by tokens/sec per GPU-hour.
 A backend that's meaningfully faster at the same hardware and output quality directly
 lowers $/million-tokens served — which matters more as more AI infrastructure spend shifts
 toward self-hosted open-weight models instead of API providers.
