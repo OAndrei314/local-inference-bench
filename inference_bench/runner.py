@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from .backend import BackendSpec, get_backend
+from .memory import RssSampler
 from .workload import WorkloadItem
 
 
@@ -18,12 +19,14 @@ def load_backend_specs(config_path: str | Path) -> list[tuple[str, BackendSpec, 
     out = []
     for entry in raw["backends"]:
         kind = entry.get("kind", "openai_compat")
+        pid = entry.get("pid")
         spec = BackendSpec(
             name=entry["name"],
             base_url=entry.get("base_url", ""),
             model=entry.get("model", entry["name"]),
             api_key_env=entry.get("api_key_env"),
             timeout_s=float(entry.get("timeout_s", 120.0)),
+            pid=int(pid) if pid is not None else None,
         )
         extra = {
             k: v for k, v in entry.items()
@@ -46,6 +49,11 @@ def run_benchmark(
     for kind, spec, extra in backend_specs:
         backend = get_backend(kind, **extra)
         out_path = out_dir / f"{spec.name}.jsonl"
+
+        sampler = RssSampler(spec.pid) if spec.pid is not None else None
+        if sampler is not None:
+            sampler.start()
+
         with out_path.open("w", encoding="utf-8") as f:
             for item in workload:
                 for rep in range(repeats):
@@ -70,4 +78,12 @@ def run_benchmark(
                         ),
                     }
                     f.write(json.dumps(record) + "\n")
+
+        if sampler is not None:
+            stats = sampler.stop()
+            memory_path = out_dir / f"{spec.name}.memory.json"
+            memory_path.write_text(json.dumps(stats.to_dict(), indent=2) + "\n", encoding="utf-8")
+            print(f"[{spec.name}] memory: peak={stats.peak_mb} MB mean={stats.mean_mb} MB "
+                  f"({stats.sample_count} samples) -> {memory_path}")
+
         print(f"[{spec.name}] wrote {len(workload) * repeats} runs -> {out_path}")

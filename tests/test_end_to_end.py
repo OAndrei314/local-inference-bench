@@ -1,4 +1,6 @@
 """End-to-end test using only MockBackend -- no server or network access required."""
+import os
+
 from inference_bench.report import build_report
 from inference_bench.runner import load_backend_specs, run_benchmark
 from inference_bench.workload import DEFAULT_WORKLOAD
@@ -52,3 +54,35 @@ def test_streaming_pipeline_records_ttft(tmp_path):
     assert all(r["stream"] is True for r in records)
     assert all(r["ttft_s"] is not None for r in records)
     assert all(r["decode_tokens_per_s"] is not None for r in records)
+
+
+def test_pipeline_samples_serving_process_memory_when_pid_configured(tmp_path):
+    config_path = tmp_path / "backends.yaml"
+    config_path.write_text(
+        f"""
+backends:
+  - name: self-mock
+    kind: mock
+    tokens_per_s: 80
+    overhead_s: 0.03
+    pid: {os.getpid()}
+"""
+    )
+    specs = load_backend_specs(config_path)
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=2, out_dir=out_dir)
+
+    memory_path = out_dir / "self-mock.memory.json"
+    assert memory_path.exists()
+
+    import json
+
+    stats = json.loads(memory_path.read_text())
+    assert stats["sample_count"] >= 1
+    assert stats["peak_mb"] > 0
+    assert stats["mean_mb"] > 0
+
+    report = build_report(out_dir)
+    assert "Serving process memory (RSS)" in report
+    assert "self-mock" in report

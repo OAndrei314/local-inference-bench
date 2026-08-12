@@ -1,6 +1,11 @@
 # Copy to configs/backends.yaml and point at real local servers.
 # Any OpenAI-compatible /v1/chat/completions endpoint works -- Ollama, vLLM, llama.cpp
 # server mode, etc.
+#
+# `pid` is optional. Set it to the serving process's PID (e.g. `pgrep -f vllm`) to have
+# the harness sample its RSS from /proc/<pid>/status while the benchmark runs and report
+# peak/mean memory alongside latency and throughput. Only works when the harness can read
+# that PID's /proc entry -- same host (or container/namespace), Linux only.
 backends:
   - name: ollama-local
     kind: openai_compat
@@ -8,6 +13,7 @@ backends:
     model: llama4
     api_key_env: null
     timeout_s: 120
+    pid: null
 
   - name: vllm-local
     kind: openai_compat
@@ -15,3 +21,4 @@ backends:
     model: qwen-3.5
     api_key_env: null
     timeout_s: 120
+    pid: null
