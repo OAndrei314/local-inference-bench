@@ -22,6 +22,7 @@ class BackendSpec:
     model: str
     api_key_env: str | None = None
     timeout_s: float = 120.0
+    pid: int | None = None  # serving process PID, for optional RSS sampling
 
 
 @dataclass(frozen=True)

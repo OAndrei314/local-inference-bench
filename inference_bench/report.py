@@ -38,10 +38,22 @@ def _load_records(results_dir: str | Path) -> dict[str, list[dict]]:
     return by_backend
 
 
+def _load_memory_stats(results_dir: str | Path) -> dict[str, dict]:
+    results_dir = Path(results_dir)
+    by_backend: dict[str, dict] = {}
+    for path in sorted(results_dir.glob("*.memory.json")):
+        backend_name = path.name.removesuffix(".memory.json")
+        with path.open(encoding="utf-8") as f:
+            by_backend[backend_name] = json.load(f)
+    return by_backend
+
+
 def build_report(results_dir: str | Path) -> str:
     by_backend = _load_records(results_dir)
     if not by_backend:
         return "# Inference Backend Benchmark Report\n\nNo results found.\n"
+
+    memory_stats = _load_memory_stats(results_dir)
 
     lines = [
         "# Inference Backend Benchmark Report",
@@ -108,5 +120,24 @@ def build_report(results_dir: str | Path) -> str:
             vals = by_bucket.get(b, [])
             row.append(f"{(sum(vals) / len(vals)):.3f}" if vals else "-")
         lines.append("| " + " | ".join(row) + " |")
+
+    if memory_stats:
+        lines.append("")
+        lines.append("### Serving process memory (RSS)")
+        lines.append("")
+        lines.append(
+            "Sampled from `/proc/<pid>/status` on the configured server PID while the "
+            "backend's runs executed -- requires the harness and server to share a host "
+            "(or /proc namespace) and a `pid` set in the backend config."
+        )
+        lines.append("")
+        lines.append("| backend | peak RSS (MB) | mean RSS (MB) | samples |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for backend in sorted(memory_stats):
+            stats = memory_stats[backend]
+            lines.append(
+                f"| {backend} | {_format_float(stats.get('peak_mb'), 1)} | "
+                f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} |"
+            )
 
     return "\n".join(lines) + "\n"
