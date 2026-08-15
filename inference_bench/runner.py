@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from .backend import BackendSpec, get_backend
-from .memory import RssSampler
+from .memory import GpuVramSampler, RssSampler
 from .workload import WorkloadItem
 
 
@@ -51,8 +51,11 @@ def run_benchmark(
         out_path = out_dir / f"{spec.name}.jsonl"
 
         sampler = RssSampler(spec.pid) if spec.pid is not None else None
+        gpu_sampler = GpuVramSampler(spec.pid) if spec.pid is not None else None
         if sampler is not None:
             sampler.start()
+        if gpu_sampler is not None:
+            gpu_sampler.start()
 
         with out_path.open("w", encoding="utf-8") as f:
             for item in workload:
@@ -85,5 +88,14 @@ def run_benchmark(
             memory_path.write_text(json.dumps(stats.to_dict(), indent=2) + "\n", encoding="utf-8")
             print(f"[{spec.name}] memory: peak={stats.peak_mb} MB mean={stats.mean_mb} MB "
                   f"({stats.sample_count} samples) -> {memory_path}")
+
+        if gpu_sampler is not None:
+            gpu_stats = gpu_sampler.stop()
+            gpu_memory_path = out_dir / f"{spec.name}.gpu_memory.json"
+            gpu_memory_path.write_text(
+                json.dumps(gpu_stats.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
+            print(f"[{spec.name}] gpu vram: peak={gpu_stats.peak_mb} MB mean={gpu_stats.mean_mb} MB "
+                  f"({gpu_stats.sample_count} samples) -> {gpu_memory_path}")
 
         print(f"[{spec.name}] wrote {len(workload) * repeats} runs -> {out_path}")

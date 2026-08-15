@@ -48,12 +48,23 @@ def _load_memory_stats(results_dir: str | Path) -> dict[str, dict]:
     return by_backend
 
 
+def _load_gpu_memory_stats(results_dir: str | Path) -> dict[str, dict]:
+    results_dir = Path(results_dir)
+    by_backend: dict[str, dict] = {}
+    for path in sorted(results_dir.glob("*.gpu_memory.json")):
+        backend_name = path.name.removesuffix(".gpu_memory.json")
+        with path.open(encoding="utf-8") as f:
+            by_backend[backend_name] = json.load(f)
+    return by_backend
+
+
 def build_report(results_dir: str | Path) -> str:
     by_backend = _load_records(results_dir)
     if not by_backend:
         return "# Inference Backend Benchmark Report\n\nNo results found.\n"
 
     memory_stats = _load_memory_stats(results_dir)
+    gpu_memory_stats = _load_gpu_memory_stats(results_dir)
 
     lines = [
         "# Inference Backend Benchmark Report",
@@ -135,6 +146,27 @@ def build_report(results_dir: str | Path) -> str:
         lines.append("| --- | ---: | ---: | ---: |")
         for backend in sorted(memory_stats):
             stats = memory_stats[backend]
+            lines.append(
+                f"| {backend} | {_format_float(stats.get('peak_mb'), 1)} | "
+                f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} |"
+            )
+
+    if gpu_memory_stats:
+        lines.append("")
+        lines.append("### Serving process GPU VRAM")
+        lines.append("")
+        lines.append(
+            "Sampled from `nvidia-smi --query-compute-apps` on the configured server PID "
+            "while the backend's runs executed -- requires an NVIDIA GPU, `nvidia-smi` on "
+            "PATH, and a `pid` set in the backend config. `sample_count: 0` means "
+            "`nvidia-smi` was unavailable or the PID never showed up as a GPU compute "
+            "process (e.g. a CPU-only backend), not that VRAM usage was zero."
+        )
+        lines.append("")
+        lines.append("| backend | peak VRAM (MB) | mean VRAM (MB) | samples |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for backend in sorted(gpu_memory_stats):
+            stats = gpu_memory_stats[backend]
             lines.append(
                 f"| {backend} | {_format_float(stats.get('peak_mb'), 1)} | "
                 f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} |"
