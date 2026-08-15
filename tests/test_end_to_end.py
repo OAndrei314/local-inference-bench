@@ -86,3 +86,79 @@ backends:
     report = build_report(out_dir)
     assert "Serving process memory (RSS)" in report
     assert "self-mock" in report
+
+
+def test_pipeline_writes_gpu_vram_file_with_null_stats_when_no_gpu_present(tmp_path):
+    """Honest-scope-limit test: this sandbox has no NVIDIA GPU / nvidia-smi, so the
+    pipeline should still write a gpu_memory.json file (opted in via `pid`) with null
+    stats rather than failing -- mirroring how RSS sampling degrades on non-Linux."""
+    config_path = tmp_path / "backends.yaml"
+    config_path.write_text(
+        f"""
+backends:
+  - name: self-mock
+    kind: mock
+    tokens_per_s: 80
+    overhead_s: 0.03
+    pid: {os.getpid()}
+"""
+    )
+    specs = load_backend_specs(config_path)
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=2, out_dir=out_dir)
+
+    gpu_memory_path = out_dir / "self-mock.gpu_memory.json"
+    assert gpu_memory_path.exists()
+
+    import json
+
+    stats = json.loads(gpu_memory_path.read_text())
+    assert stats == {"peak_mb": None, "mean_mb": None, "sample_count": 0}
+
+    # No GPU section in the report when every backend's GPU sample_count is 0 --
+    # _load_gpu_memory_stats still returns the entry, so the section header does show
+    # up, but with an honest all-null row rather than being silently omitted.
+    report = build_report(out_dir)
+    assert "Serving process GPU VRAM" in report
+
+
+def test_pipeline_samples_gpu_vram_when_nvidia_smi_available(tmp_path, monkeypatch):
+    """Simulates an nvidia-smi-equipped host via monkeypatch, since this sandbox has no
+    real GPU -- verifies the pipeline actually plumbs GPU samples through to the report
+    when they are available, not just the null-stats degraded path."""
+    import inference_bench.memory as memory_module
+
+    pid = os.getpid()
+    values = iter([1000.0, 1500.0, 1200.0, 1800.0])
+    monkeypatch.setattr(
+        memory_module, "read_gpu_vram_mb", lambda p: next(values, None) if p == pid else None
+    )
+
+    config_path = tmp_path / "backends.yaml"
+    config_path.write_text(
+        f"""
+backends:
+  - name: self-mock
+    kind: mock
+    tokens_per_s: 80
+    overhead_s: 0.03
+    pid: {pid}
+"""
+    )
+    specs = load_backend_specs(config_path)
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=2, out_dir=out_dir)
+
+    import json
+
+    gpu_memory_path = out_dir / "self-mock.gpu_memory.json"
+    stats = json.loads(gpu_memory_path.read_text())
+    assert stats["sample_count"] >= 1
+    assert stats["peak_mb"] > 0
+    assert stats["mean_mb"] > 0
+
+    report = build_report(out_dir)
+    assert "Serving process GPU VRAM" in report
+    assert "self-mock" in report
