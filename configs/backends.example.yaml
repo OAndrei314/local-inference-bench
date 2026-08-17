@@ -6,6 +6,11 @@
 # the harness sample its RSS from /proc/<pid>/status while the benchmark runs and report
 # peak/mean memory alongside latency and throughput. Only works when the harness can read
 # that PID's /proc entry -- same host (or container/namespace), Linux only.
+#
+# `gpu_vendor` is optional and only matters when `pid` is set -- it picks which CLI tool
+# samples GPU VRAM for that PID: `nvidia` (default) shells out to `nvidia-smi`, `amd`
+# shells out to `rocm-smi`. Leave it as `nvidia` (or omit it) for CPU-only backends; the
+# sampler just reports null stats when the tool or GPU isn't present.
 backends:
   - name: ollama-local
     kind: openai_compat
@@ -14,6 +19,7 @@ backends:
     api_key_env: null
     timeout_s: 120
     pid: null
+    gpu_vendor: nvidia
 
   - name: vllm-local
     kind: openai_compat
@@ -22,3 +28,13 @@ backends:
     api_key_env: null
     timeout_s: 120
     pid: null
+    gpu_vendor: nvidia
+
+  - name: vllm-rocm-local
+    kind: openai_compat
+    base_url: http://localhost:8001/v1
+    model: qwen-3.5
+    api_key_env: null
+    timeout_s: 120
+    pid: null
+    gpu_vendor: amd

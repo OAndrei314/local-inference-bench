@@ -22,7 +22,8 @@ class BackendSpec:
     model: str
     api_key_env: str | None = None
     timeout_s: float = 120.0
-    pid: int | None = None  # serving process PID, for optional RSS sampling
+    pid: int | None = None  # serving process PID, for optional RSS/GPU sampling
+    gpu_vendor: str = "nvidia"  # "nvidia" or "amd" -- picks the GPU VRAM sampler
 
 
 @dataclass(frozen=True)

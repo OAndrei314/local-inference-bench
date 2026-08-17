@@ -114,7 +114,7 @@ backends:
     import json
 
     stats = json.loads(gpu_memory_path.read_text())
-    assert stats == {"peak_mb": None, "mean_mb": None, "sample_count": 0}
+    assert stats == {"peak_mb": None, "mean_mb": None, "sample_count": 0, "vendor": "nvidia"}
 
     # No GPU section in the report when every backend's GPU sample_count is 0 --
     # _load_gpu_memory_stats still returns the entry, so the section header does show
@@ -158,7 +158,52 @@ backends:
     assert stats["sample_count"] >= 1
     assert stats["peak_mb"] > 0
     assert stats["mean_mb"] > 0
+    assert stats["vendor"] == "nvidia"
 
     report = build_report(out_dir)
     assert "Serving process GPU VRAM" in report
     assert "self-mock" in report
+
+
+def test_pipeline_samples_amd_gpu_vram_when_rocm_smi_available(tmp_path, monkeypatch):
+    """Same as the nvidia-smi pipeline test above, but for the `gpu_vendor: amd` path --
+    verifies the config knob actually routes to AmdGpuVramSampler/read_amd_gpu_vram_mb
+    end to end, not just that the standalone sampler unit works."""
+    import inference_bench.memory as memory_module
+
+    pid = os.getpid()
+    values = iter([2048.0, 3072.0, 2560.0])
+    monkeypatch.setattr(
+        memory_module, "read_amd_gpu_vram_mb", lambda p: next(values, None) if p == pid else None
+    )
+
+    config_path = tmp_path / "backends.yaml"
+    config_path.write_text(
+        f"""
+backends:
+  - name: self-mock-amd
+    kind: mock
+    tokens_per_s: 80
+    overhead_s: 0.03
+    pid: {pid}
+    gpu_vendor: amd
+"""
+    )
+    specs = load_backend_specs(config_path)
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=2, out_dir=out_dir)
+
+    import json
+
+    gpu_memory_path = out_dir / "self-mock-amd.gpu_memory.json"
+    stats = json.loads(gpu_memory_path.read_text())
+    assert stats["sample_count"] >= 1
+    assert stats["peak_mb"] > 0
+    assert stats["mean_mb"] > 0
+    assert stats["vendor"] == "amd"
+
+    report = build_report(out_dir)
+    assert "Serving process GPU VRAM" in report
+    assert "self-mock-amd" in report
+    assert "amd" in report

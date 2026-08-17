@@ -6,9 +6,11 @@ import sys
 import time
 
 from inference_bench.memory import (
+    AmdGpuVramSampler,
     GpuVramSampler,
     MemoryStats,
     RssSampler,
+    read_amd_gpu_vram_mb,
     read_gpu_vram_mb,
     read_rss_mb,
 )
@@ -122,6 +124,102 @@ def test_gpu_vram_sampler_yields_no_samples_when_nvidia_smi_unavailable(monkeypa
     monkeypatch.setattr(memory_module, "read_gpu_vram_mb", lambda pid: None)
 
     sampler = GpuVramSampler(pid=1, interval_s=0.02)
+    sampler.start()
+    time.sleep(0.06)
+    stats = sampler.stop()
+
+    assert stats == MemoryStats(peak_mb=None, mean_mb=None, sample_count=0)
+
+
+# --- AMD (rocm-smi) coverage -------------------------------------------------------
+#
+# `rocm-smi --showpids` output, per the ROCm CLI docs/source: a banner, then a table
+# with columns `PID  PROCESS NAME  GPU(s)  VRAM USED  SDMA USED  CU OCCUPANCY`, VRAM
+# reported in bytes and one row already aggregated per PID (not per PID+GPU pair like
+# nvidia-smi). 2097152000 B == 2000.0 MB and 4294967296 B == 4096.0 MB exactly, chosen
+# so the /1048576 conversion is checkable by inspection.
+_ROCM_SHOWPIDS_OUTPUT = """\
+======================= ROCm System Management Interface =======================
+================================== Concurrent Processes ==================================
+PID     PROCESS NAME              GPU(s)   VRAM USED    SDMA USED   CU OCCUPANCY
+1234    python                    0        2097152000   0           0
+5678    vllm                      0,1      4294967296   0           15
+9999    ghost                     0        UNKNOWN      0           0
+====================================================================================
+================================== End of ROCm SMI Log ===================================
+"""
+
+
+def _fake_rocm_smi(stdout: str, returncode: int = 0):
+    def _run(*args, **kwargs):
+        return subprocess.CompletedProcess(args, returncode=returncode, stdout=stdout, stderr="")
+
+    return _run
+
+
+def test_parse_rocm_showpids_vram_mb_finds_matching_pid():
+    from inference_bench.memory import _parse_rocm_showpids_vram_mb
+
+    assert _parse_rocm_showpids_vram_mb(_ROCM_SHOWPIDS_OUTPUT, 1234) == 2000.0
+    assert _parse_rocm_showpids_vram_mb(_ROCM_SHOWPIDS_OUTPUT, 5678) == 4096.0
+
+
+def test_parse_rocm_showpids_vram_mb_returns_none_for_absent_pid():
+    from inference_bench.memory import _parse_rocm_showpids_vram_mb
+
+    assert _parse_rocm_showpids_vram_mb(_ROCM_SHOWPIDS_OUTPUT, 4242) is None
+
+
+def test_parse_rocm_showpids_vram_mb_returns_none_for_unknown_vram():
+    from inference_bench.memory import _parse_rocm_showpids_vram_mb
+
+    # rocm-smi reports the literal string UNKNOWN when the driver can't attribute
+    # usage to a PID -- must not be parsed as 0 MB.
+    assert _parse_rocm_showpids_vram_mb(_ROCM_SHOWPIDS_OUTPUT, 9999) is None
+
+
+def test_read_amd_gpu_vram_mb_returns_none_when_rocm_smi_missing(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("no rocm-smi on PATH")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert read_amd_gpu_vram_mb(1234) is None
+
+
+def test_read_amd_gpu_vram_mb_returns_none_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", _fake_rocm_smi("", returncode=1))
+    assert read_amd_gpu_vram_mb(1234) is None
+
+
+def test_read_amd_gpu_vram_mb_parses_matching_pid_from_subprocess_output(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", _fake_rocm_smi(_ROCM_SHOWPIDS_OUTPUT))
+    assert read_amd_gpu_vram_mb(5678) == 4096.0
+    assert read_amd_gpu_vram_mb(4242) is None
+
+
+def test_amd_gpu_vram_sampler_collects_monkeypatched_samples(monkeypatch):
+    import inference_bench.memory as memory_module
+
+    values = iter([500.0, 750.0, 250.0])
+    monkeypatch.setattr(memory_module, "read_amd_gpu_vram_mb", lambda pid: next(values, None))
+
+    sampler = AmdGpuVramSampler(pid=1, interval_s=0.02)
+    sampler.start()
+    time.sleep(0.1)
+    stats = sampler.stop()
+
+    assert stats.sample_count >= 1
+    assert stats.peak_mb is not None
+    assert stats.mean_mb is not None
+    assert stats.peak_mb >= stats.mean_mb
+
+
+def test_amd_gpu_vram_sampler_yields_no_samples_when_rocm_smi_unavailable(monkeypatch):
+    import inference_bench.memory as memory_module
+
+    monkeypatch.setattr(memory_module, "read_amd_gpu_vram_mb", lambda pid: None)
+
+    sampler = AmdGpuVramSampler(pid=1, interval_s=0.02)
     sampler.start()
     time.sleep(0.06)
     stats = sampler.stop()
