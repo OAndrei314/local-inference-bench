@@ -74,7 +74,7 @@ def build_report(results_dir: str | Path) -> str:
         "At fixed hardware and model, does inference-server choice materially change",
         "latency and throughput -- enough to justify a migration?",
         "",
-        "## Money question",
+        "## Practical impact",
         "",
         "Self-hosted inference cost is dominated by tokens/sec per GPU-hour. A backend",
         "that's meaningfully faster at the same hardware and quality directly lowers",
@@ -156,19 +156,22 @@ def build_report(results_dir: str | Path) -> str:
         lines.append("### Serving process GPU VRAM")
         lines.append("")
         lines.append(
-            "Sampled from `nvidia-smi --query-compute-apps` on the configured server PID "
-            "while the backend's runs executed -- requires an NVIDIA GPU, `nvidia-smi` on "
-            "PATH, and a `pid` set in the backend config. `sample_count: 0` means "
-            "`nvidia-smi` was unavailable or the PID never showed up as a GPU compute "
-            "process (e.g. a CPU-only backend), not that VRAM usage was zero."
+            "Sampled from `nvidia-smi --query-compute-apps` (NVIDIA) or `rocm-smi "
+            "--showpids` (AMD) on the configured server PID while the backend's runs "
+            "executed -- requires a matching GPU + CLI tool on PATH and a `pid` set in "
+            "the backend config (`gpu_vendor: amd` to select rocm-smi; defaults to "
+            "nvidia-smi). `sample_count: 0` means the tool was unavailable or the PID "
+            "never showed up as a GPU compute process (e.g. a CPU-only backend), not "
+            "that VRAM usage was zero."
         )
         lines.append("")
-        lines.append("| backend | peak VRAM (MB) | mean VRAM (MB) | samples |")
-        lines.append("| --- | ---: | ---: | ---: |")
+        lines.append("| backend | vendor | peak VRAM (MB) | mean VRAM (MB) | samples |")
+        lines.append("| --- | --- | ---: | ---: | ---: |")
         for backend in sorted(gpu_memory_stats):
             stats = gpu_memory_stats[backend]
             lines.append(
-                f"| {backend} | {_format_float(stats.get('peak_mb'), 1)} | "
+                f"| {backend} | {stats.get('vendor', 'nvidia')} | "
+                f"{_format_float(stats.get('peak_mb'), 1)} | "
                 f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} |"
             )
 
