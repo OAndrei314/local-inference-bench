@@ -4,12 +4,15 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from inference_bench.memory import (
     AmdGpuVramSampler,
     GpuVramSampler,
     MemoryStats,
     RssSampler,
+    _read_rss_mb_via_proc,
+    _read_rss_mb_via_ps,
     read_amd_gpu_vram_mb,
     read_gpu_vram_mb,
     read_rss_mb,
@@ -66,6 +69,78 @@ def test_memory_stats_to_dict_rounds_and_handles_none():
 
     empty = MemoryStats(peak_mb=None, mean_mb=None, sample_count=0)
     assert empty.to_dict() == {"peak_mb": None, "mean_mb": None, "sample_count": 0}
+
+
+def test_read_rss_mb_dispatches_to_proc_when_proc_exists(monkeypatch):
+    import inference_bench.memory as memory_module
+
+    monkeypatch.setattr(Path, "is_dir", lambda self: True)
+    monkeypatch.setattr(memory_module, "_read_rss_mb_via_proc", lambda pid: 111.0)
+    monkeypatch.setattr(memory_module, "_read_rss_mb_via_ps", lambda pid: 222.0)
+    assert read_rss_mb(1234) == 111.0
+
+
+def test_read_rss_mb_falls_back_to_ps_when_no_proc(monkeypatch):
+    import inference_bench.memory as memory_module
+
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+    monkeypatch.setattr(memory_module, "_read_rss_mb_via_proc", lambda pid: 111.0)
+    monkeypatch.setattr(memory_module, "_read_rss_mb_via_ps", lambda pid: 222.0)
+    assert read_rss_mb(1234) == 222.0
+
+
+def test_read_rss_mb_via_ps_for_current_process_is_positive():
+    # Real `ps` subprocess (available on both Linux and macOS runners), bypassing
+    # the /proc dispatch to exercise the macOS-fallback code path directly.
+    rss = _read_rss_mb_via_ps(os.getpid())
+    assert rss is not None
+    assert rss > 0
+
+
+def test_read_rss_mb_via_proc_for_current_process_matches_via_ps_within_tolerance():
+    # Cross-check: on this Linux CI host both paths read the same process's RSS,
+    # so they should agree closely even though one reads /proc and the other
+    # shells out to `ps` (small drift is expected -- they sample microseconds apart).
+    proc_rss = _read_rss_mb_via_proc(os.getpid())
+    ps_rss = _read_rss_mb_via_ps(os.getpid())
+    assert proc_rss is not None and ps_rss is not None
+    assert abs(proc_rss - ps_rss) / proc_rss < 0.5
+
+
+def test_read_rss_mb_via_ps_returns_none_when_ps_missing(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("no ps on PATH")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert _read_rss_mb_via_ps(1234) is None
+
+
+def test_read_rss_mb_via_ps_returns_none_for_exited_process(monkeypatch):
+    # `ps -o rss= -p <gone>` exits nonzero with empty stdout once the PID is gone.
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, returncode=1, stdout="", stderr=""),
+    )
+    assert _read_rss_mb_via_ps(1234) is None
+
+
+def test_read_rss_mb_via_ps_parses_kb_output_to_mb(monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, returncode=0, stdout="20480\n", stderr=""),
+    )
+    assert _read_rss_mb_via_ps(1234) == 20.0
+
+
+def test_read_rss_mb_via_ps_returns_none_on_unparseable_output(monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, returncode=0, stdout="garbage\n", stderr=""),
+    )
+    assert _read_rss_mb_via_ps(1234) is None
 
 
 def _fake_nvidia_smi(stdout: str, returncode: int = 0):
