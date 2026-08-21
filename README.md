@@ -74,18 +74,22 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
 
    A real comparison requires actually running two backends on the same hardware and model
    — that's on you (or whoever clones this) to do, not something a mock can substitute for.
-3. **RSS sampling is Linux-only; GPU VRAM sampling needs `nvidia-smi` or `rocm-smi`.**
-   RSS reads `/proc/<pid>/status`, which requires the harness and the serving process
-   to share a host (or /proc namespace) and does not exist on macOS/Windows —
-   `read_rss_mb` returns `None` there and the harness just omits it from the report.
-   GPU VRAM sampling shells out to `nvidia-smi --query-compute-apps` (default) or
-   `rocm-smi --showpids` (`gpu_vendor: amd` in the backend config), which requires a
-   matching GPU and driver — on any other host, or for a CPU-only backend (e.g.
-   llama.cpp in CPU mode), it returns `None` and the harness still writes a
-   `sample_count: 0` file rather than failing, so a missing GPU never silently reads as
-   "0 MB used." For most self-hosted GPU serving (vLLM, Ollama with a GPU backend),
-   VRAM is the memory pressure that actually constrains deployment; host RSS is most
-   useful for CPU-bound backends or for isolating host-side overhead.
+3. **RSS sampling now covers Linux and macOS; GPU VRAM sampling needs `nvidia-smi` or
+   `rocm-smi`.** RSS reads `/proc/<pid>/status` directly on Linux (no subprocess); on
+   platforms without `/proc` — macOS, both Intel and Apple Silicon — it falls back to
+   shelling out to `ps -o rss= -p <pid>`. Either path requires the harness and the
+   serving process to share a host (or PID namespace). Windows isn't covered by
+   either, so `read_rss_mb` returns `None` there and the harness just omits it from
+   the report. GPU VRAM sampling shells out to `nvidia-smi --query-compute-apps`
+   (default) or `rocm-smi --showpids` (`gpu_vendor: amd` in the backend config),
+   which requires a matching discrete GPU and driver — on any other host, or for a
+   CPU-only backend (e.g. llama.cpp in CPU mode), it returns `None` and the harness
+   still writes a `sample_count: 0` file rather than failing, so a missing GPU never
+   silently reads as "0 MB used." For most self-hosted GPU serving (vLLM, Ollama with
+   a discrete GPU backend), VRAM is the memory pressure that actually constrains
+   deployment; host RSS is most useful for CPU-bound backends, for isolating
+   host-side overhead, or — on Apple Silicon — as the complete memory picture, since
+   its unified memory means there's no separate GPU pool to sample (see next item).
 4. **GPU VRAM aggregation differs by vendor, both intentionally end up as one number
    per PID.** `nvidia-smi --query-compute-apps` emits one row per (GPU, PID) pair, so a
    backend sharded across multiple NVIDIA GPUs is summed here. `rocm-smi --showpids`
@@ -101,19 +105,36 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
 
 ## Status / next steps
 
-GPU VRAM sampling now covers both major GPU vendors: `nvidia-smi --query-compute-apps`
-(default) and `rocm-smi --showpids` (`gpu_vendor: amd` in the backend config), keyed by
-the same serving-process PID used for RSS sampling — see `<backend>.gpu_memory.json`
-(now tagged with a `vendor` field) and the "Serving process GPU VRAM" report section.
-Both remain untested against real GPU hardware in this environment (the CI runner and
-sandbox have neither an NVIDIA nor an AMD GPU); the parsing and threading logic are
-covered by tests with monkeypatched `nvidia-smi`/`rocm-smi` output built from each
-tool's documented format, but a real run against vLLM/Ollama on actual GPU boxes of
-both vendors is the honest way to confirm the output-format assumptions hold across
-driver versions. With both vendors covered, the next natural gap is Apple Silicon
-(`llama.cpp`/MLX on unified memory) — there's no separate VRAM concept there, so it
-would need a different metric (e.g. process memory footprint under Metal) rather than
-a third GPU-vendor branch of this same sampler shape.
+GPU VRAM sampling covers both major discrete GPU vendors: `nvidia-smi
+--query-compute-apps` (default) and `rocm-smi --showpids` (`gpu_vendor: amd` in the
+backend config), keyed by the same serving-process PID used for RSS sampling — see
+`<backend>.gpu_memory.json` (tagged with a `vendor` field) and the "Serving process
+GPU VRAM" report section. Both remain untested against real GPU hardware in this
+environment (the CI runner and sandbox have neither an NVIDIA nor an AMD GPU); the
+parsing and threading logic are covered by tests with monkeypatched
+`nvidia-smi`/`rocm-smi` output built from each tool's documented format, but a real
+run against vLLM/Ollama on actual GPU boxes of both vendors is the honest way to
+confirm the output-format assumptions hold across driver versions.
+
+RSS sampling — previously Linux-only via `/proc/<pid>/status` — now also covers
+macOS (Intel and Apple Silicon) via a `ps -o rss= -p <pid>` fallback, chosen because
+`read_rss_mb` already dispatches on whether `/proc` exists, so this is the natural
+place to add the second platform rather than a new function callers have to know
+about. This directly answers the unified-memory gap noted here previously: Apple
+Silicon has no discrete VRAM pool to sample the way `nvidia-smi`/`rocm-smi` do, so
+host RSS *is* the complete GPU-resident memory picture for an MLX or llama.cpp
+Metal backend there — no third GPU-vendor sampler branch was needed after all. The
+`ps` fallback is exercised by a real subprocess in CI (Linux, calling
+`_read_rss_mb_via_ps` directly rather than through the `/proc`-preferring dispatch,
+and cross-checked against the same process's `/proc` reading to confirm the two
+paths agree), but the macOS branch of `read_rss_mb` itself — where `Path("/proc")`
+genuinely doesn't exist — has only been exercised via a monkeypatched dispatch test,
+not a real Mac; that's the honest gap left in this feature. Two possible next steps
+from here: an actual run on Apple hardware to confirm `ps`'s column format holds
+across macOS versions (mirroring the same honesty caveat already carried by the
+untested ROCm path above), or extending `report.py` to label the RSS column as the
+authoritative memory figure (rather than a fallback) when no GPU VRAM sampler ran
+for a backend, since on Apple Silicon it isn't a fallback at all.
 
 ## License
 

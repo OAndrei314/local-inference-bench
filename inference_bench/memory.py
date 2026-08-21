@@ -2,12 +2,15 @@
 
 Only meaningful when the harness runs on the same host as the backend server (or
 has /proc access to it, e.g. same container/namespace) -- which is common for local
-self-hosted benchmarking (Ollama/vLLM/llama.cpp on the same box as the harness).
-Host RSS sampling reads /proc/<pid>/status directly rather than shelling out to `ps`,
-so it has no extra dependency and works without permission to send signals to the
-process. GPU VRAM sampling shells out to `nvidia-smi` (NVIDIA) or `rocm-smi` (AMD)
-since there's no /proc equivalent for GPU memory -- for most self-hosted LLM serving
-on a GPU, VRAM is the metric that actually constrains deployment, not host RSS.
+self-hosted benchmarking (Ollama/vLLM/llama.cpp/MLX on the same box as the harness).
+Host RSS sampling reads /proc/<pid>/status directly on Linux, with no extra
+dependency and no permission needed to signal the process; on platforms without
+/proc (macOS) it falls back to `ps -o rss=`. GPU VRAM sampling shells out to
+`nvidia-smi` (NVIDIA) or `rocm-smi` (AMD) since there's no /proc equivalent for GPU
+memory -- for most self-hosted LLM serving on a discrete GPU, VRAM is the metric
+that actually constrains deployment, not host RSS. Apple Silicon has no discrete-GPU
+VRAM sampler because it has no discrete VRAM: its unified memory architecture means
+host RSS *is* the GPU-resident footprint there too.
 """
 from __future__ import annotations
 
@@ -19,12 +22,22 @@ from typing import Callable
 
 
 def read_rss_mb(pid: int) -> float | None:
-    """Reads current resident set size for `pid` in MB from /proc/<pid>/status.
+    """Reads current resident set size for `pid` in MB.
 
-    Returns None if unavailable: non-Linux (no /proc), the process has already
-    exited, or permission is denied. This is a point-in-time snapshot, not an
-    average -- callers that want peak/mean over a run should sample repeatedly.
+    Dispatches on whether /proc exists: Linux reads /proc/<pid>/status directly
+    (no subprocess, no extra dependency); everything else -- notably macOS, which
+    has no /proc -- falls back to shelling out to `ps`. Returns None if the process
+    has already exited or permission is denied. This is a point-in-time snapshot,
+    not an average -- callers that want peak/mean over a run should sample
+    repeatedly (see RssSampler).
     """
+    if Path("/proc").is_dir():
+        return _read_rss_mb_via_proc(pid)
+    return _read_rss_mb_via_ps(pid)
+
+
+def _read_rss_mb_via_proc(pid: int) -> float | None:
+    """Reads RSS from /proc/<pid>/status. Linux only -- see `read_rss_mb`."""
     status_path = Path(f"/proc/{pid}/status")
     try:
         with status_path.open(encoding="utf-8") as f:
@@ -38,6 +51,38 @@ def read_rss_mb(pid: int) -> float | None:
     except (FileNotFoundError, PermissionError, ProcessLookupError):
         return None
     return None
+
+
+def _read_rss_mb_via_ps(pid: int) -> float | None:
+    """Reads RSS for `pid` in MB via `ps -o rss= -p <pid>` (RSS in KB, no header).
+
+    Fallback for platforms without /proc -- chiefly macOS, both Intel and Apple
+    Silicon. On Apple Silicon's unified memory architecture, CPU and GPU share one
+    physical memory pool, so this host RSS already reflects a serving process's
+    GPU-resident weights and KV-cache too; there is no separate "VRAM" pool to
+    sample the way `read_gpu_vram_mb`/`read_amd_gpu_vram_mb` do for a discrete
+    NVIDIA/AMD GPU, so no Apple-specific VRAM sampler exists or is needed here.
+
+    Returns None if `ps` is missing, the call errors or times out, the PID has
+    already exited (empty stdout / nonzero exit), or the output isn't a plain
+    integer.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    output = result.stdout.strip()
+    if result.returncode != 0 or not output:
+        return None
+    try:
+        return int(output) / 1024
+    except ValueError:
+        return None
 
 
 def read_gpu_vram_mb(pid: int) -> float | None:
