@@ -142,13 +142,30 @@ def build_report(results_dir: str | Path) -> str:
             "(or /proc namespace) and a `pid` set in the backend config."
         )
         lines.append("")
-        lines.append("| backend | peak RSS (MB) | mean RSS (MB) | samples |")
-        lines.append("| --- | ---: | ---: | ---: |")
+        lines.append("| backend | peak RSS (MB) | mean RSS (MB) | samples | memory picture |")
+        lines.append("| --- | ---: | ---: | ---: | --- |")
+        any_complete = False
         for backend in sorted(memory_stats):
             stats = memory_stats[backend]
+            gpu_stats = gpu_memory_stats.get(backend, {})
+            if gpu_stats.get("sample_count", 0) > 0:
+                picture = "supplementary (see GPU VRAM below)"
+            else:
+                picture = "complete -- no GPU VRAM observed"
+                any_complete = True
             lines.append(
                 f"| {backend} | {_format_float(stats.get('peak_mb'), 1)} | "
-                f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} |"
+                f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} | "
+                f"{picture} |"
+            )
+        if any_complete:
+            lines.append("")
+            lines.append(
+                '"Complete" means no GPU VRAM samples were collected for that backend -- '
+                "either no discrete GPU was present (e.g. Apple Silicon unified memory or a "
+                "CPU-only backend) or `nvidia-smi`/`rocm-smi` was unavailable. In that case "
+                "host RSS already is the full memory picture, not a fallback standing in for "
+                "a metric the harness failed to collect."
             )
 
     if gpu_memory_stats:

@@ -90,6 +90,11 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
    deployment; host RSS is most useful for CPU-bound backends, for isolating
    host-side overhead, or — on Apple Silicon — as the complete memory picture, since
    its unified memory means there's no separate GPU pool to sample (see next item).
+   The report's RSS table labels each backend's row `complete -- no GPU VRAM
+   observed` or `supplementary (see GPU VRAM below)` based on whether that
+   backend's own `gpu_memory.json` has any real samples (`sample_count > 0`), so a
+   reader doesn't have to infer from context whether the RSS number is the whole
+   memory picture or just host-side overhead alongside a real VRAM figure.
 4. **GPU VRAM aggregation differs by vendor, both intentionally end up as one number
    per PID.** `nvidia-smi --query-compute-apps` emits one row per (GPU, PID) pair, so a
    backend sharded across multiple NVIDIA GPUs is summed here. `rocm-smi --showpids`
@@ -129,12 +134,24 @@ Metal backend there — no third GPU-vendor sampler branch was needed after all.
 and cross-checked against the same process's `/proc` reading to confirm the two
 paths agree), but the macOS branch of `read_rss_mb` itself — where `Path("/proc")`
 genuinely doesn't exist — has only been exercised via a monkeypatched dispatch test,
-not a real Mac; that's the honest gap left in this feature. Two possible next steps
-from here: an actual run on Apple hardware to confirm `ps`'s column format holds
-across macOS versions (mirroring the same honesty caveat already carried by the
-untested ROCm path above), or extending `report.py` to label the RSS column as the
-authoritative memory figure (rather than a fallback) when no GPU VRAM sampler ran
-for a backend, since on Apple Silicon it isn't a fallback at all.
+not a real Mac; that's the honest gap left in this feature.
+
+The report now labels each backend's RSS row `complete -- no GPU VRAM observed` or
+`supplementary (see GPU VRAM below)`, based on whether that backend's
+`gpu_memory.json` actually collected any samples (`sample_count > 0`) rather than
+just being present. This was possible without any new sampling logic because
+`runner.py` already starts the RSS and GPU samplers together whenever a backend
+sets `pid` (see `run_benchmark`), so the two result files for a given backend
+always exist as a pair — the report just had to read both to decide which label
+applies, instead of leaving a reader to infer from the surrounding prose whether a
+given RSS number is the whole memory picture or host-side overhead next to a real
+VRAM figure. Covered by `tests/test_end_to_end.py`, both the null-GPU-stats and the
+monkeypatched-real-GPU-stats cases.
+
+The one remaining honest gap: an actual run on Apple hardware to confirm `ps`'s
+column format holds across macOS versions, mirroring the same caveat already
+carried by the untested ROCm path above. Both are real-hardware verification gaps
+that no amount of additional mocking in this sandbox can close.
 
 ## License
 

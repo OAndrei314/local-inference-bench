@@ -121,6 +121,10 @@ backends:
     # up, but with an honest all-null row rather than being silently omitted.
     report = build_report(out_dir)
     assert "Serving process GPU VRAM" in report
+    # sample_count is 0, so RSS is labeled the complete memory picture for this
+    # backend rather than an incomplete fallback for a metric that failed to collect.
+    assert "complete -- no GPU VRAM observed" in report
+    assert "supplementary" not in report
 
 
 def test_pipeline_samples_gpu_vram_when_nvidia_smi_available(tmp_path, monkeypatch):
@@ -163,6 +167,10 @@ backends:
     report = build_report(out_dir)
     assert "Serving process GPU VRAM" in report
     assert "self-mock" in report
+    # sample_count > 0 here, so RSS is labeled supplementary to the real GPU VRAM
+    # figure rather than claiming to be the complete memory picture.
+    assert "supplementary (see GPU VRAM below)" in report
+    assert "complete -- no GPU VRAM observed" not in report
 
 
 def test_pipeline_samples_amd_gpu_vram_when_rocm_smi_available(tmp_path, monkeypatch):
