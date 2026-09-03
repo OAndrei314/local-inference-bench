@@ -36,6 +36,18 @@ toward self-hosted open-weight models instead of API providers.
 - `inference_bench/report.py` — aggregates into mean/p50/p95 latency and mean tokens/sec,
   streaming TTFT, decode throughput, overall results, workload buckets, and (when
   available) serving-process memory.
+- A failed request against a real server — connection refused, timeout, a non-2xx
+  status, or a response body that isn't valid JSON — is caught in `backend.py` and
+  recorded on that run (`error` field in the JSONL, `error_count` towards the
+  backend's total) instead of raising and aborting the rest of the benchmark. A
+  server that's flaky or still warming up shouldn't cost you every other backend's
+  results. `runner.py` stops the RSS/GPU samplers and writes their stats in a
+  `finally` block for the same reason: a backend that errors on every request should
+  still leave behind whatever memory samples it collected before the failures
+  started. `report.py` excludes errored runs from the latency/TTFT/throughput
+  aggregates (a connection-refused error's near-zero elapsed time is not a response
+  latency) and lists the distinct error messages seen per backend in an "Errors"
+  section.
 
 ## Quickstart
 
@@ -67,10 +79,10 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
 2. **The mock numbers below are a pipeline demonstration, not a backend comparison.** They
    come from `MockBackend`'s two hardcoded rate/overhead presets, not real servers:
 
-   | backend | runs | mean latency (s) | p50 (s) | p95 (s) | mean TTFT (s) | mean tokens/s | mean decode tokens/s |
-   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-   | mock-fast | 18 | 1.397 | 0.830 | 3.230 | 0.030 | 72.64 | 80.00 |
-   | mock-slow | 18 | 4.523 | 2.710 | 10.390 | 0.150 | 21.76 | 25.00 |
+   | backend | runs | errors | mean latency (s) | p50 (s) | p95 (s) | mean TTFT (s) | mean tokens/s | mean decode tokens/s |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | mock-fast | 18 | 0 | 1.397 | 0.830 | 3.230 | 0.030 | 72.64 | 80.00 |
+   | mock-slow | 18 | 0 | 4.523 | 2.710 | 10.390 | 0.150 | 21.76 | 25.00 |
 
    A real comparison requires actually running two backends on the same hardware and model
    — that's on you (or whoever clones this) to do, not something a mock can substitute for.
@@ -107,8 +119,37 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
    parsing logic is covered by tests against a hand-built sample table (including its
    `UNKNOWN` VRAM case), but confirming the assumption holds across ROCm versions needs
    an actual run against vLLM/Ollama on an AMD GPU box.
+6. **A failed request is recorded, not retried.** `run --repeats N` still issues exactly
+   `N` requests per prompt even if every one of them errors — the harness doesn't back
+   off or re-send. That's a deliberate simplification: a benchmark's job is to report
+   what actually happened (including a server that's down or overloaded), not to paper
+   over it with retries that would themselves become a hidden variable in the latency
+   numbers.
 
 ## Status / next steps
+
+Until now, any single failed request against a real server — connection refused,
+timeout, a non-2xx status, or an unparseable response body — crashed the whole
+benchmark run with an unhandled exception, silently discarding every other
+backend's already-collected results and, if a `pid` was configured, leaking the
+RSS/GPU sampler threads without ever writing their stats file. That's the opposite
+of what a benchmark harness should do against real self-hosted servers, which are
+exactly the kind of thing that times out or 500s partway through a long run (a
+cold model load, an OOM, a restart). `OpenAICompatBackend.complete` now catches
+`URLError`/`HTTPError`/`TimeoutError`/`JSONDecodeError`/`OSError` around each
+request (streaming and non-streaming) and returns a `RequestResult` with an
+`error` message instead of raising; `run_benchmark` records that per-run in the
+JSONL (`error` field) and always stops the samplers and writes their partial
+stats in a `finally` block, even if every request for a backend failed. The
+report excludes errored runs from the latency/TTFT/throughput aggregates (a
+connection-refused error's near-zero elapsed time isn't a real response latency)
+and adds an "Errors" column plus a section listing the distinct error messages
+seen per backend, so a reader sees *that* a backend was unreachable, not just a
+silently-missing row. Covered by `tests/test_backend.py` (connection error, HTTP
+error, malformed JSON, and the streaming path, all via monkeypatched `urlopen`)
+and one full-pipeline test in `tests/test_end_to_end.py` confirming the run
+finishes, the memory sampler's stats still get written, and the report surfaces
+the failure instead of hiding it.
 
 GPU VRAM sampling covers both major discrete GPU vendors: `nvidia-smi
 --query-compute-apps` (default) and `rocm-smi --showpids` (`gpu_vendor: amd` in the

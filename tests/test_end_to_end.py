@@ -1,5 +1,7 @@
 """End-to-end test using only MockBackend -- no server or network access required."""
+import json
 import os
+import urllib.error
 
 from inference_bench.report import build_report
 from inference_bench.runner import load_backend_specs, run_benchmark
@@ -215,3 +217,49 @@ backends:
     assert "Serving process GPU VRAM" in report
     assert "self-mock-amd" in report
     assert "amd" in report
+
+
+def test_pipeline_records_backend_errors_without_aborting_the_run(tmp_path, monkeypatch):
+    """A failing real-server request (connection refused, timeout, bad response) must be
+    recorded per-run rather than crashing the whole benchmark -- and the serving process's
+    memory sampler must still be stopped and its stats file written, since the sampler was
+    already running when the request failed."""
+    import inference_bench.backend as backend_module
+
+    def _raise(req, timeout):
+        raise urllib.error.URLError(ConnectionRefusedError("Connection refused"))
+
+    monkeypatch.setattr(backend_module.urllib.request, "urlopen", _raise)
+
+    pid = os.getpid()
+    config_path = tmp_path / "backends.yaml"
+    config_path.write_text(
+        f"""
+backends:
+  - name: unreachable
+    kind: openai_compat
+    base_url: http://127.0.0.1:1
+    pid: {pid}
+"""
+    )
+    specs = load_backend_specs(config_path)
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=1, out_dir=out_dir)
+
+    records = [
+        json.loads(line) for line in (out_dir / "unreachable.jsonl").read_text().splitlines()
+    ]
+    assert len(records) == len(DEFAULT_WORKLOAD)
+    assert all(r["error"] is not None for r in records)
+    assert all(r["completion_tokens"] is None for r in records)
+
+    memory_path = out_dir / "unreachable.memory.json"
+    assert memory_path.exists()
+    stats = json.loads(memory_path.read_text())
+    assert stats["sample_count"] >= 1
+
+    report = build_report(out_dir)
+    assert "### Errors" in report
+    assert "unreachable" in report
+    assert "Connection refused" in report
