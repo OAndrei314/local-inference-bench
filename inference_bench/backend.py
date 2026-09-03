@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +35,29 @@ class RequestResult:
     ttft_s: float | None = None
     decode_tokens_per_s: float | None = None
     tokens_estimated: bool = False
+    error: str | None = None  # set instead of raising when a request fails
+
+
+# Exceptions a single flaky request against a real server can raise: connection
+# refused/reset/DNS failure (URLError), a non-2xx HTTP status (HTTPError, a
+# URLError subclass), a client-side timeout, or a response body that isn't valid
+# JSON (a crashed/misbehaving server). One bad run shouldn't take down the rest of
+# the benchmark, so `OpenAICompatBackend.complete` catches these and reports them
+# on the `RequestResult` instead of letting them propagate out of `run_benchmark`.
+_REQUEST_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError)
+
+
+def _error_result(latency_s: float, exc: Exception) -> RequestResult:
+    if isinstance(exc, urllib.error.HTTPError):
+        message = f"HTTPError: {exc.code} {exc.reason}"
+    else:
+        message = f"{type(exc).__name__}: {exc}"
+    return RequestResult(
+        latency_s=latency_s,
+        completion_tokens=None,
+        tokens_per_s=None,
+        error=message,
+    )
 
 
 class Backend:
@@ -118,8 +142,11 @@ class OpenAICompatBackend(Backend):
         if stream:
             return self._complete_streaming(req, spec.timeout_s, start)
 
-        with urllib.request.urlopen(req, timeout=spec.timeout_s) as resp:
-            body = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=spec.timeout_s) as resp:
+                body = json.loads(resp.read())
+        except _REQUEST_ERRORS as exc:
+            return _error_result(time.monotonic() - start, exc)
         latency = time.monotonic() - start
 
         usage = body.get("usage", {})
@@ -136,26 +163,29 @@ class OpenAICompatBackend(Backend):
         completion_tokens: int | None = None
         content_parts: list[str] = []
 
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            while True:
-                raw_line = resp.readline()
-                if not raw_line:
-                    break
-                event = _parse_sse_data_line(raw_line)
-                if event is None:
-                    continue
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                while True:
+                    raw_line = resp.readline()
+                    if not raw_line:
+                        break
+                    event = _parse_sse_data_line(raw_line)
+                    if event is None:
+                        continue
 
-                usage = event.get("usage") or {}
-                if usage.get("completion_tokens") is not None:
-                    completion_tokens = int(usage["completion_tokens"])
+                    usage = event.get("usage") or {}
+                    if usage.get("completion_tokens") is not None:
+                        completion_tokens = int(usage["completion_tokens"])
 
-                for choice in event.get("choices", []):
-                    delta = choice.get("delta") or {}
-                    content = delta.get("content") or ""
-                    if content:
-                        if first_token_at is None:
-                            first_token_at = time.monotonic()
-                        content_parts.append(content)
+                    for choice in event.get("choices", []):
+                        delta = choice.get("delta") or {}
+                        content = delta.get("content") or ""
+                        if content:
+                            if first_token_at is None:
+                                first_token_at = time.monotonic()
+                            content_parts.append(content)
+        except _REQUEST_ERRORS as exc:
+            return _error_result(time.monotonic() - start, exc)
 
         latency = time.monotonic() - start
         tokens_estimated = False

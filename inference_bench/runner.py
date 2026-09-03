@@ -68,46 +68,66 @@ def run_benchmark(
         if gpu_sampler is not None:
             gpu_sampler.start()
 
-        with out_path.open("w", encoding="utf-8") as f:
-            for item in workload:
-                for rep in range(repeats):
-                    result = backend.complete(spec, item.prompt, item.max_tokens, stream=stream)
-                    record = {
-                        "backend": spec.name,
-                        "item_id": item.id,
-                        "rep": rep,
-                        "max_tokens": item.max_tokens,
-                        "stream": stream,
-                        "latency_s": round(result.latency_s, 4),
-                        "completion_tokens": result.completion_tokens,
-                        "tokens_estimated": result.tokens_estimated,
-                        "tokens_per_s": (
-                            round(result.tokens_per_s, 2) if result.tokens_per_s else None
-                        ),
-                        "ttft_s": round(result.ttft_s, 4) if result.ttft_s is not None else None,
-                        "decode_tokens_per_s": (
-                            round(result.decode_tokens_per_s, 2)
-                            if result.decode_tokens_per_s
-                            else None
-                        ),
-                    }
-                    f.write(json.dumps(record) + "\n")
+        error_count = 0
+        try:
+            with out_path.open("w", encoding="utf-8") as f:
+                for item in workload:
+                    for rep in range(repeats):
+                        result = backend.complete(
+                            spec, item.prompt, item.max_tokens, stream=stream
+                        )
+                        if result.error is not None:
+                            error_count += 1
+                        record = {
+                            "backend": spec.name,
+                            "item_id": item.id,
+                            "rep": rep,
+                            "max_tokens": item.max_tokens,
+                            "stream": stream,
+                            "latency_s": round(result.latency_s, 4),
+                            "completion_tokens": result.completion_tokens,
+                            "tokens_estimated": result.tokens_estimated,
+                            "tokens_per_s": (
+                                round(result.tokens_per_s, 2) if result.tokens_per_s else None
+                            ),
+                            "ttft_s": (
+                                round(result.ttft_s, 4) if result.ttft_s is not None else None
+                            ),
+                            "decode_tokens_per_s": (
+                                round(result.decode_tokens_per_s, 2)
+                                if result.decode_tokens_per_s
+                                else None
+                            ),
+                            "error": result.error,
+                        }
+                        f.write(json.dumps(record) + "\n")
+        finally:
+            # Runs in a `finally` so a failed request -- or any other exception mid-workload
+            # -- still stops the sampler threads and writes their partial stats, instead of
+            # leaking a daemon thread and silently dropping the memory/GPU-VRAM files for a
+            # backend that ran into trouble.
+            if sampler is not None:
+                stats = sampler.stop()
+                memory_path = out_dir / f"{spec.name}.memory.json"
+                memory_path.write_text(
+                    json.dumps(stats.to_dict(), indent=2) + "\n", encoding="utf-8"
+                )
+                print(f"[{spec.name}] memory: peak={stats.peak_mb} MB mean={stats.mean_mb} MB "
+                      f"({stats.sample_count} samples) -> {memory_path}")
 
-        if sampler is not None:
-            stats = sampler.stop()
-            memory_path = out_dir / f"{spec.name}.memory.json"
-            memory_path.write_text(json.dumps(stats.to_dict(), indent=2) + "\n", encoding="utf-8")
-            print(f"[{spec.name}] memory: peak={stats.peak_mb} MB mean={stats.mean_mb} MB "
-                  f"({stats.sample_count} samples) -> {memory_path}")
+            if gpu_sampler is not None:
+                gpu_stats = gpu_sampler.stop()
+                gpu_memory_path = out_dir / f"{spec.name}.gpu_memory.json"
+                gpu_record = {**gpu_stats.to_dict(), "vendor": spec.gpu_vendor}
+                gpu_memory_path.write_text(
+                    json.dumps(gpu_record, indent=2) + "\n", encoding="utf-8"
+                )
+                print(f"[{spec.name}] {spec.gpu_vendor} gpu vram: peak={gpu_stats.peak_mb} MB "
+                      f"mean={gpu_stats.mean_mb} MB ({gpu_stats.sample_count} samples) "
+                      f"-> {gpu_memory_path}")
 
-        if gpu_sampler is not None:
-            gpu_stats = gpu_sampler.stop()
-            gpu_memory_path = out_dir / f"{spec.name}.gpu_memory.json"
-            gpu_record = {**gpu_stats.to_dict(), "vendor": spec.gpu_vendor}
-            gpu_memory_path.write_text(
-                json.dumps(gpu_record, indent=2) + "\n", encoding="utf-8"
-            )
-            print(f"[{spec.name}] {spec.gpu_vendor} gpu vram: peak={gpu_stats.peak_mb} MB "
-                  f"mean={gpu_stats.mean_mb} MB ({gpu_stats.sample_count} samples) -> {gpu_memory_path}")
-
-        print(f"[{spec.name}] wrote {len(workload) * repeats} runs -> {out_path}")
+        if error_count:
+            print(f"[{spec.name}] {error_count}/{len(workload) * repeats} runs errored "
+                  f"-> {out_path}")
+        else:
+            print(f"[{spec.name}] wrote {len(workload) * repeats} runs -> {out_path}")

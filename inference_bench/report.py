@@ -82,25 +82,31 @@ def build_report(results_dir: str | Path) -> str:
         "",
         "## Results",
         "",
-        "| backend | runs | mean latency (s) | p50 (s) | p95 (s) | mean TTFT (s) | p95 TTFT (s) | mean tokens/s | mean decode tokens/s | est. token runs |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| backend | runs | errors | mean latency (s) | p50 (s) | p95 (s) | mean TTFT (s) | p95 TTFT (s) | mean tokens/s | mean decode tokens/s | est. token runs |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 
+    any_errors = False
     for backend, recs in sorted(by_backend.items()):
-        latencies = sorted(r["latency_s"] for r in recs)
-        mean_lat = sum(latencies) / len(latencies)
-        p50 = _percentile(latencies, 50)
-        p95 = _percentile(latencies, 95)
-        ttfts = sorted(r["ttft_s"] for r in recs if r.get("ttft_s") is not None)
+        ok_recs = [r for r in recs if r.get("error") is None]
+        errors = len(recs) - len(ok_recs)
+        if errors:
+            any_errors = True
+        latencies = sorted(r["latency_s"] for r in ok_recs)
+        mean_lat = _mean(latencies)
+        p50 = _percentile(latencies, 50) if latencies else None
+        p95 = _percentile(latencies, 95) if latencies else None
+        ttfts = sorted(r["ttft_s"] for r in ok_recs if r.get("ttft_s") is not None)
         mean_ttft = _mean(ttfts)
         p95_ttft = _percentile(ttfts, 95) if ttfts else None
-        throughputs = [r["tokens_per_s"] for r in recs if r.get("tokens_per_s")]
+        throughputs = [r["tokens_per_s"] for r in ok_recs if r.get("tokens_per_s")]
         mean_tps = _mean(throughputs)
-        decode_tps = [r["decode_tokens_per_s"] for r in recs if r.get("decode_tokens_per_s")]
+        decode_tps = [r["decode_tokens_per_s"] for r in ok_recs if r.get("decode_tokens_per_s")]
         mean_decode_tps = _mean(decode_tps)
-        estimated_token_runs = sum(1 for r in recs if r.get("tokens_estimated"))
+        estimated_token_runs = sum(1 for r in ok_recs if r.get("tokens_estimated"))
         lines.append(
-            f"| {backend} | {len(recs)} | {mean_lat:.3f} | {p50:.3f} | {p95:.3f} | "
+            f"| {backend} | {len(recs)} | {errors} | {_format_float(mean_lat)} | "
+            f"{_format_float(p50)} | {_format_float(p95)} | "
             f"{_format_float(mean_ttft)} | {_format_float(p95_ttft)} | "
             f"{_format_float(mean_tps, 2)} | {_format_float(mean_decode_tps, 2)} | "
             f"{estimated_token_runs} |"
@@ -112,8 +118,26 @@ def build_report(results_dir: str | Path) -> str:
             "TTFT and decode throughput are populated only for runs captured with",
             "`run --stream`. If a server does not report usage in streaming mode,",
             "completion tokens are estimated from streamed text and counted above.",
+            "Latency/TTFT/throughput statistics exclude errored runs -- a connection",
+            "failure's elapsed time isn't a real response latency, so mixing it in would",
+            "distort the comparison rather than inform it.",
         ]
     )
+
+    if any_errors:
+        lines.append("")
+        lines.append("### Errors")
+        lines.append("")
+        lines.append(
+            "A failed request (connection refused, timeout, non-2xx status, or an"
+            " unparseable response body) is recorded rather than aborting the rest of"
+            " the benchmark. Distinct error messages observed per backend:"
+        )
+        lines.append("")
+        for backend, recs in sorted(by_backend.items()):
+            messages = sorted({r["error"] for r in recs if r.get("error") is not None})
+            if messages:
+                lines.append(f"- **{backend}**: " + "; ".join(messages))
 
     lines.append("")
     lines.append("### By workload bucket (short/medium/long)")
