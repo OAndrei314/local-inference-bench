@@ -1,7 +1,9 @@
 """Runs a workload against a backend `repeats` times each, writes one JSONL record per run."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import time
 from pathlib import Path
 
 import yaml
@@ -45,13 +47,36 @@ def load_backend_specs(config_path: str | Path) -> list[tuple[str, BackendSpec, 
     return out
 
 
+def _record_from_result(item: WorkloadItem, rep: int, stream: bool, spec: BackendSpec, result) -> dict:
+    return {
+        "backend": spec.name,
+        "item_id": item.id,
+        "rep": rep,
+        "max_tokens": item.max_tokens,
+        "stream": stream,
+        "latency_s": round(result.latency_s, 4),
+        "completion_tokens": result.completion_tokens,
+        "tokens_estimated": result.tokens_estimated,
+        "tokens_per_s": (round(result.tokens_per_s, 2) if result.tokens_per_s else None),
+        "ttft_s": (round(result.ttft_s, 4) if result.ttft_s is not None else None),
+        "decode_tokens_per_s": (
+            round(result.decode_tokens_per_s, 2) if result.decode_tokens_per_s else None
+        ),
+        "error": result.error,
+    }
+
+
 def run_benchmark(
     workload: list[WorkloadItem],
     backend_specs: list[tuple[str, BackendSpec, dict]],
     repeats: int,
     out_dir: str | Path,
     stream: bool = False,
+    concurrency: int = 1,
 ) -> None:
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -69,38 +94,61 @@ def run_benchmark(
             gpu_sampler.start()
 
         error_count = 0
+        tasks = [(item, rep) for item in workload for rep in range(repeats)]
         try:
             with out_path.open("w", encoding="utf-8") as f:
-                for item in workload:
-                    for rep in range(repeats):
+                if concurrency == 1:
+                    for item, rep in tasks:
                         result = backend.complete(
                             spec, item.prompt, item.max_tokens, stream=stream
                         )
                         if result.error is not None:
                             error_count += 1
-                        record = {
-                            "backend": spec.name,
-                            "item_id": item.id,
-                            "rep": rep,
-                            "max_tokens": item.max_tokens,
-                            "stream": stream,
-                            "latency_s": round(result.latency_s, 4),
-                            "completion_tokens": result.completion_tokens,
-                            "tokens_estimated": result.tokens_estimated,
-                            "tokens_per_s": (
-                                round(result.tokens_per_s, 2) if result.tokens_per_s else None
-                            ),
-                            "ttft_s": (
-                                round(result.ttft_s, 4) if result.ttft_s is not None else None
-                            ),
-                            "decode_tokens_per_s": (
-                                round(result.decode_tokens_per_s, 2)
-                                if result.decode_tokens_per_s
-                                else None
-                            ),
-                            "error": result.error,
+                        f.write(json.dumps(_record_from_result(item, rep, stream, spec, result)) + "\n")
+                else:
+                    # Fires all (item, rep) requests for this backend at once through a
+                    # thread pool, instead of one at a time -- a sequential run can't tell
+                    # a server that internally batches concurrent requests (e.g. vLLM's
+                    # continuous batching) apart from one that just serializes them behind
+                    # a single worker, since both look identical under concurrency=1.
+                    results: list = [None] * len(tasks)
+                    batch_start = time.monotonic()
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                        future_to_idx = {
+                            pool.submit(
+                                backend.complete, spec, item.prompt, item.max_tokens, stream
+                            ): idx
+                            for idx, (item, rep) in enumerate(tasks)
                         }
-                        f.write(json.dumps(record) + "\n")
+                        for future in concurrent.futures.as_completed(future_to_idx):
+                            results[future_to_idx[future]] = future.result()
+                    batch_wall_s = time.monotonic() - batch_start
+
+                    for (item, rep), result in zip(tasks, results):
+                        if result.error is not None:
+                            error_count += 1
+                        f.write(json.dumps(_record_from_result(item, rep, stream, spec, result)) + "\n")
+
+                    ok_results = [r for r in results if r.error is None]
+                    total_tokens = sum(r.completion_tokens for r in ok_results if r.completion_tokens)
+                    aggregate_tps = total_tokens / batch_wall_s if total_tokens and batch_wall_s > 0 else None
+                    concurrency_stats = {
+                        "concurrency": concurrency,
+                        "request_count": len(tasks),
+                        "error_count": error_count,
+                        "wall_s": round(batch_wall_s, 4),
+                        "total_completion_tokens": total_tokens,
+                        "aggregate_tokens_per_s": round(aggregate_tps, 2) if aggregate_tps else None,
+                    }
+                    concurrency_path = out_dir / f"{spec.name}.concurrency.json"
+                    concurrency_path.write_text(
+                        json.dumps(concurrency_stats, indent=2) + "\n", encoding="utf-8"
+                    )
+                    print(
+                        f"[{spec.name}] concurrency={concurrency}: "
+                        f"{concurrency_stats['aggregate_tokens_per_s']} aggregate tokens/s "
+                        f"over {batch_wall_s:.2f}s wall time -> {concurrency_path}"
+                    )
         finally:
             # Runs in a `finally` so a failed request -- or any other exception mid-workload
             # -- still stops the sampler threads and writes their partial stats, instead of

@@ -219,6 +219,84 @@ backends:
     assert "amd" in report
 
 
+def test_concurrent_run_writes_all_records_and_an_aggregate_throughput_file(tmp_path):
+    specs = load_backend_specs("configs/mock.yaml")
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=3, out_dir=out_dir, concurrency=4)
+
+    for name in ("mock-fast", "mock-slow"):
+        records = [
+            json.loads(line) for line in (out_dir / f"{name}.jsonl").read_text().splitlines()
+        ]
+        # Every (item, rep) pair still gets exactly one record, in the original
+        # item/rep order, even though the requests themselves ran concurrently.
+        assert len(records) == len(DEFAULT_WORKLOAD) * 3
+        assert [r["item_id"] for r in records] == [
+            item.id for item in DEFAULT_WORKLOAD for _ in range(3)
+        ]
+        assert all(r["error"] is None for r in records)
+
+        concurrency_path = out_dir / f"{name}.concurrency.json"
+        assert concurrency_path.exists()
+        stats = json.loads(concurrency_path.read_text())
+        assert stats["concurrency"] == 4
+        assert stats["request_count"] == len(DEFAULT_WORKLOAD) * 3
+        assert stats["error_count"] == 0
+        assert stats["wall_s"] > 0
+        assert stats["total_completion_tokens"] == sum(r["completion_tokens"] for r in records)
+        assert stats["aggregate_tokens_per_s"] > 0
+
+    report = build_report(out_dir)
+    assert "Concurrent throughput" in report
+    assert "mock-fast" in report and "mock-slow" in report
+
+
+def test_run_benchmark_rejects_non_positive_concurrency(tmp_path):
+    import pytest
+
+    specs = load_backend_specs("configs/mock.yaml")
+    with pytest.raises(ValueError, match="concurrency"):
+        run_benchmark(DEFAULT_WORKLOAD, specs, repeats=1, out_dir=tmp_path / "results", concurrency=0)
+
+
+def test_concurrent_run_still_records_per_request_errors(tmp_path, monkeypatch):
+    """Concurrency must not swallow per-request failures -- a request that errors under
+    a concurrent batch is still recorded with its error and excluded from the aggregate
+    throughput's token count, the same way it's excluded from the sequential path."""
+    import inference_bench.backend as backend_module
+
+    def _raise(req, timeout):
+        raise urllib.error.URLError(ConnectionRefusedError("Connection refused"))
+
+    monkeypatch.setattr(backend_module.urllib.request, "urlopen", _raise)
+
+    config_path = tmp_path / "backends.yaml"
+    config_path.write_text(
+        """
+backends:
+  - name: unreachable
+    kind: openai_compat
+    base_url: http://127.0.0.1:1
+"""
+    )
+    specs = load_backend_specs(config_path)
+    out_dir = tmp_path / "results"
+
+    run_benchmark(DEFAULT_WORKLOAD, specs, repeats=1, out_dir=out_dir, concurrency=3)
+
+    records = [
+        json.loads(line) for line in (out_dir / "unreachable.jsonl").read_text().splitlines()
+    ]
+    assert len(records) == len(DEFAULT_WORKLOAD)
+    assert all(r["error"] is not None for r in records)
+
+    stats = json.loads((out_dir / "unreachable.concurrency.json").read_text())
+    assert stats["error_count"] == len(DEFAULT_WORKLOAD)
+    assert stats["total_completion_tokens"] == 0
+    assert stats["aggregate_tokens_per_s"] is None
+
+
 def test_pipeline_records_backend_errors_without_aborting_the_run(tmp_path, monkeypatch):
     """A failing real-server request (connection refused, timeout, bad response) must be
     recorded per-run rather than crashing the whole benchmark -- and the serving process's

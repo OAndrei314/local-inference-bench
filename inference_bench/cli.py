@@ -21,6 +21,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="request streaming completions and measure time-to-first-token",
     )
+    run_p.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="fire this many requests at once per backend and report aggregate "
+        "throughput, instead of one request at a time (default: 1)",
+    )
 
     report_p = sub.add_parser("report", help="build a markdown report from results")
     report_p.add_argument("--results", required=True, help="results directory (from `run --out`)")
@@ -30,7 +37,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         specs = load_backend_specs(args.config)
-        run_benchmark(DEFAULT_WORKLOAD, specs, args.repeats, args.out, stream=args.stream)
+        run_benchmark(
+            DEFAULT_WORKLOAD, specs, args.repeats, args.out,
+            stream=args.stream, concurrency=args.concurrency,
+        )
         return 0
 
     if args.command == "report":
