@@ -58,6 +58,16 @@ def _load_gpu_memory_stats(results_dir: str | Path) -> dict[str, dict]:
     return by_backend
 
 
+def _load_concurrency_stats(results_dir: str | Path) -> dict[str, dict]:
+    results_dir = Path(results_dir)
+    by_backend: dict[str, dict] = {}
+    for path in sorted(results_dir.glob("*.concurrency.json")):
+        backend_name = path.name.removesuffix(".concurrency.json")
+        with path.open(encoding="utf-8") as f:
+            by_backend[backend_name] = json.load(f)
+    return by_backend
+
+
 def build_report(results_dir: str | Path) -> str:
     by_backend = _load_records(results_dir)
     if not by_backend:
@@ -65,6 +75,7 @@ def build_report(results_dir: str | Path) -> str:
 
     memory_stats = _load_memory_stats(results_dir)
     gpu_memory_stats = _load_gpu_memory_stats(results_dir)
+    concurrency_stats = _load_concurrency_stats(results_dir)
 
     lines = [
         "# Inference Backend Benchmark Report",
@@ -214,6 +225,34 @@ def build_report(results_dir: str | Path) -> str:
                 f"| {backend} | {stats.get('vendor', 'nvidia')} | "
                 f"{_format_float(stats.get('peak_mb'), 1)} | "
                 f"{_format_float(stats.get('mean_mb'), 1)} | {stats.get('sample_count', 0)} |"
+            )
+
+    if concurrency_stats:
+        lines.append("")
+        lines.append("### Concurrent throughput")
+        lines.append("")
+        lines.append(
+            "A single request at a time can't reveal whether a server actually overlaps "
+            "concurrent requests (e.g. vLLM's continuous batching) or just serializes them "
+            "behind one worker -- both look identical under `--concurrency 1`. This section "
+            "comes from `run --concurrency N`, which fires N requests at a backend at once "
+            "and measures aggregate throughput: total completion tokens across the whole "
+            "concurrent batch divided by that batch's wall time. A backend with real internal "
+            "batching should show aggregate throughput well above its single-request rate at "
+            "higher concurrency; one that just queues requests behind a single worker won't."
+        )
+        lines.append("")
+        lines.append(
+            "| backend | concurrency | requests | errors | wall time (s) | "
+            "aggregate tokens/s |"
+        )
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+        for backend in sorted(concurrency_stats):
+            stats = concurrency_stats[backend]
+            lines.append(
+                f"| {backend} | {stats.get('concurrency')} | {stats.get('request_count')} | "
+                f"{stats.get('error_count')} | {_format_float(stats.get('wall_s'))} | "
+                f"{_format_float(stats.get('aggregate_tokens_per_s'), 2)} |"
             )
 
     return "\n".join(lines) + "\n"

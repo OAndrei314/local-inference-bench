@@ -27,7 +27,12 @@ toward self-hosted open-weight models instead of API providers.
   of one aggregate number.
 - `inference_bench/runner.py` — runs the workload against each configured backend
   `--repeats` times, writes per-run JSONL, and can request streaming responses to measure
-  time-to-first-token.
+  time-to-first-token. `--concurrency N` fires all `(prompt, repeat)` requests for a
+  backend through an `N`-worker thread pool instead of one at a time, and additionally
+  writes `<backend>.concurrency.json` with the aggregate throughput (total completion
+  tokens across the whole concurrent batch divided by that batch's wall time) — the
+  metric that actually distinguishes a server with real continuous batching from one
+  that just serializes concurrent connections behind a single worker.
 - `inference_bench/memory.py` — if a backend config sets `pid`, samples that process's
   RSS from `/proc/<pid>/status` on a background thread for the duration of its runs and
   writes peak/mean RSS to `<backend>.memory.json`. It also samples GPU VRAM for the same
@@ -68,6 +73,10 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
 # Add `pid: <server PID>` to a backend entry (e.g. `pid: $(pgrep -f vllm)`) to also
 # capture its peak/mean RSS for that run -- requires the harness and server on the
 # same host.
+
+# Concurrency mode: fires 8 requests at once per backend and reports aggregate
+# throughput, revealing whether a backend actually batches concurrent requests
+python -m inference_bench.cli run --config configs/mock.yaml --repeats 5 --out results/mock-concurrent --concurrency 8
 ```
 
 ## Honest scope limits
@@ -125,10 +134,50 @@ python -m inference_bench.cli run --config configs/backends.yaml --repeats 5 --o
    what actually happened (including a server that's down or overloaded), not to paper
    over it with retries that would themselves become a hidden variable in the latency
    numbers.
+7. **`--concurrency` uses Python threads, which is fine here because the work is I/O-bound.**
+   Each `OpenAICompatBackend.complete` call spends essentially all of its time blocked on
+   `urllib.request.urlopen`, which releases the GIL, so a `ThreadPoolExecutor` genuinely
+   overlaps N in-flight HTTP requests rather than serializing them on CPU. It would *not*
+   be a valid way to parallelize CPU-bound work. Also: **`MockBackend`'s concurrency
+   numbers are not just "a pipeline demonstration" like its sequential numbers — they're
+   actively misleading if read at face value.** `MockBackend.complete` computes its
+   simulated latency arithmetically instead of actually blocking, so a concurrent batch of
+   mock requests finishes in a few milliseconds of thread-pool overhead regardless of
+   `max_tokens`, producing aggregate-tokens/s figures in the hundreds of thousands — see
+   the Quickstart's `--concurrency 8` run against `configs/mock.yaml`. Concurrency mode
+   only produces a meaningful number against a real server that actually takes time to
+   respond.
 
 ## Status / next steps
 
-Until now, any single failed request against a real server — connection refused,
+Until now, the harness only ever sent one request at a time per backend, even
+though the README's own research question is about production-relevant
+performance — and production inference servers spend most of their engineering
+effort on exactly the thing a sequential benchmark can't see: whether concurrent
+requests get batched together on the GPU (vLLM's and TGI's continuous batching,
+llama.cpp's parallel slots) or just queued behind a single worker. Those two
+cases produce near-identical numbers under `--concurrency 1` and very different
+ones under load. `run --concurrency N` now fires all of a backend's
+`(prompt, repeat)` requests through an `N`-worker thread pool (valid here because
+each request is I/O-bound on the socket read, not CPU-bound) and writes
+`<backend>.concurrency.json` with the request count, error count, batch wall
+time, and aggregate throughput (total completion tokens over that wall time).
+`report.py` surfaces it in a new "Concurrent throughput" section. Individual
+per-request records are unchanged and still written in original prompt/repeat
+order for reproducible diffs, and a request that errors under concurrent load is
+still recorded with its `error` field and excluded from the aggregate token
+count, exactly like the sequential path. Covered by
+`tests/test_end_to_end.py`: a full concurrent run against the mock backends,
+concurrency validation (`concurrency < 1` raises `ValueError`), and a concurrent
+run against a monkeypatched-unreachable backend confirming errors are still
+captured and excluded from the aggregate. The honest gap, spelled out in scope
+limit 7 above: this has only been exercised against `MockBackend`, which doesn't
+actually block, so the pipeline logic is verified but the *aggregate throughput
+numbers themselves* need a real multi-connection run against something like vLLM
+to be informative — that's the natural next real-hardware verification step,
+alongside the macOS and ROCm gaps already noted below.
+
+Until the previous change, any single failed request against a real server — connection refused,
 timeout, a non-2xx status, or an unparseable response body — crashed the whole
 benchmark run with an unhandled exception, silently discarding every other
 backend's already-collected results and, if a `pid` was configured, leaking the
